@@ -1,14 +1,20 @@
 package main
 
 import (
-	"bufio"
+
+	//"context"
+	//"encoding/json"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/pkg/archive"
+	"github.com/docker/docker/pkg/jsonmessage"
 	"gopkg.in/h2non/filetype.v1"
 )
 
@@ -68,10 +74,13 @@ type BuildArguments struct {
 	Platform    string                      `json:"platform,omitempty"`
 }
 
-func (s *BuildArguments) compile() (types.ImageBuildOptions, error) {
+func (s *BuildArguments) compile() (types.ImageBuildOptions, io.ReadCloser, error) {
 	var bo types.ImageBuildOptions
+	var buildCtx io.ReadCloser
+
 	bo = types.ImageBuildOptions{}
 
+	bo.SuppressOutput = false
 	bo.Tags = s.Tags
 	bo.RemoteContext = s.RemoteContext
 	bo.NoCache = s.NoCache
@@ -102,37 +111,36 @@ func (s *BuildArguments) compile() (types.ImageBuildOptions, error) {
 	bo.SessionID = s.SessionID
 	bo.Platform = s.Platform
 
-	// TODO:
-	//bo.Context = s.Src
 	fi, err := os.Stat(s.Src)
 	if err != nil {
-		return types.ImageBuildOptions{}, err
+		return bo, buildCtx, err
 	}
+
 	switch mode := fi.Mode(); {
 	case mode.IsDir():
 		// Create tar.gz stream of directory
-		reader, writer := io.Pipe()
-		defer reader.Close()
-		defer writer.Close()
-		bo.Context = reader
-		Tar(s.Src, writer)
+		r, err := archive.Tar(s.Src, archive.Gzip)
+		if err != nil {
+			return bo, buildCtx, err
+		}
+		buildCtx = r
 	case mode.IsRegular():
 		// Set context to file reader
 		kind, err := filetype.MatchFile(s.Src)
 		if err != nil {
-			return types.ImageBuildOptions{}, err
+			return bo, buildCtx, err
 		}
 
 		if kind.MIME.Value == "application/gzip" {
 			file, err := os.Open(s.Src)
 			if err != nil {
-				return types.ImageBuildOptions{}, err
+				return bo, buildCtx, err
 			}
-			bo.Context = bufio.NewReader(file)
+			buildCtx = file
 		}
 	}
 
-	return bo, nil
+	return bo, buildCtx, nil
 }
 
 func newBuildArguments() *BuildArguments {
@@ -158,20 +166,31 @@ func main() {
 		FailJson(response)
 	}
 
-	buildOpts, err := buildArgs.compile()
+	buildOpts, buildContext, err := buildArgs.compile()
 	if err != nil {
 		response.Msg = err.Error()
 		FailJson(response)
 	}
 
-	buildResponse, err := docker.ImageBuild(context.Background(), nil, buildOpts)
+	buildResponse, err := docker.ImageBuild(context.Background(), buildContext, buildOpts)
 	if err != nil {
 		response.Msg = err.Error()
 		FailJson(response)
 	}
+	defer buildResponse.Body.Close()
 
-	text, _ := json.Marshal(buildResponse)
+	imageID := ""
+	aux := func(msg jsonmessage.JSONMessage) {
+		var result types.BuildResult
+		if err := json.Unmarshal(*msg.Aux, &result); err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to parse aux message: %s", err)
+		} else {
+			imageID = result.ID
+		}
+	}
 
-	response.Msg = string(text)
+	err = jsonmessage.DisplayJSONMessagesStream(buildResponse.Body, ioutil.Discard, os.Stdout.Fd(), true, aux)
+
+	response.Msg = imageID
 	ExitJson(response)
 }
