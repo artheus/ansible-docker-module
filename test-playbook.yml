@@ -1,0 +1,10 @@
+---
+
+  - hosts: localhost
+    tasks:
+      - name: Test docker module
+        docker_build:
+          tags:
+            - "example-build"
+          remove: yes
+          src: "example/build"
