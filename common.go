@@ -1,8 +1,7 @@
-package main
+package common
 
 import (
 	"encoding/json"
-	"fmt"
 	"io/ioutil"
 	"net/http"
 	"os"
@@ -15,9 +14,16 @@ type ModuleArgs struct {
 }
 
 type Response struct {
-	Msg     string `json:"msg"`
-	Changed bool   `json:"changed"`
-	Failed  bool   `json:"failed"`
+	Msg     string                 `json:"msg"`
+	Changed bool                   `json:"changed"`
+	Failed  bool                   `json:"failed"`
+	Info    map[string]interface{} `json:"info,omitempty"`
+}
+
+func NewResponse() Response {
+	r := Response{}
+	r.Info = make(map[string]interface{})
+	return r
 }
 
 type DockerClientOpts struct {
@@ -46,9 +52,10 @@ func returnResponse(responseBody Response) {
 	var err error
 	response, err = json.Marshal(responseBody)
 	if err != nil {
-		response, _ = json.Marshal(Response{Msg: "Invalid response object"})
+		response, _ = json.Marshal(Response{Msg: "Invalid response object", Failed: true})
 	}
-	fmt.Println(string(response))
+	os.Stdout.Write(response)
+	os.Stdout.Write([]byte("\n"))
 	if responseBody.Failed {
 		os.Exit(1)
 	} else {

@@ -10,6 +10,10 @@ import (
 	"io"
 	"io/ioutil"
 	"os"
+	"strings"
+	"sync"
+
+	common "github.com/artheus/ansible-docker-module"
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
@@ -44,7 +48,7 @@ type CpuArgument struct {
 }
 
 type BuildArguments struct {
-	*DockerClientOpts
+	*common.DockerClientOpts
 
 	Tags          []string            `json:"tags,omitempty"`
 	RemoteContext string              `json:"remote_context,omitempty"`
@@ -145,52 +149,81 @@ func (s *BuildArguments) compile() (types.ImageBuildOptions, io.ReadCloser, erro
 
 func newBuildArguments() *BuildArguments {
 	ba := new(BuildArguments)
-	ba.DockerClientOpts = NewDockerClientOpts()
+	ba.DockerClientOpts = common.NewDockerClientOpts()
 	return ba
 }
 
 func main() {
-	response := Response{}
+	response := common.NewResponse()
 	buildArgs := newBuildArguments()
 
-	DecorateArgumentStruct(buildArgs, response)
+	common.DecorateArgumentStruct(buildArgs, response)
 
 	if buildArgs.Src == "" {
 		response.Msg = "src field cannot be empty, specify a directory or a tar.gz file"
-		FailJson(response)
+		common.FailJson(response)
 	}
 
-	docker, err := GetDockerClient(buildArgs.DockerClientOpts)
+	docker, err := common.GetDockerClient(buildArgs.DockerClientOpts)
 	if err != nil {
 		response.Msg = err.Error()
-		FailJson(response)
+		common.FailJson(response)
 	}
 
 	buildOpts, buildContext, err := buildArgs.compile()
 	if err != nil {
 		response.Msg = err.Error()
-		FailJson(response)
+		common.FailJson(response)
 	}
 
 	buildResponse, err := docker.ImageBuild(context.Background(), buildContext, buildOpts)
 	if err != nil {
 		response.Msg = err.Error()
-		FailJson(response)
+		common.FailJson(response)
 	}
 	defer buildResponse.Body.Close()
 
 	imageID := ""
 	aux := func(msg jsonmessage.JSONMessage) {
 		var result types.BuildResult
-		if err := json.Unmarshal(*msg.Aux, &result); err != nil {
+		err := json.Unmarshal(*msg.Aux, &result)
+		if err != nil {
 			fmt.Fprintf(os.Stderr, "Failed to parse aux message: %s", err)
 		} else {
 			imageID = result.ID
 		}
 	}
 
-	err = jsonmessage.DisplayJSONMessagesStream(buildResponse.Body, ioutil.Discard, os.Stdout.Fd(), true, aux)
+	r, w := io.Pipe()
+	var wg sync.WaitGroup
+	wg.Add(1)
 
-	response.Msg = imageID
-	ExitJson(response)
+	mw := io.MultiWriter(os.Stderr, w)
+	go func() {
+		defer wg.Done()
+		defer w.Close()
+		err := jsonmessage.DisplayJSONMessagesStream(buildResponse.Body, mw, os.Stdout.Fd(), true, aux)
+		if err != nil {
+			response.Msg = err.Error()
+			common.FailJson(response)
+		}
+	}()
+
+	dockerOutput, err := ioutil.ReadAll(r)
+	if err != nil {
+		response.Msg = err.Error()
+		common.FailJson(response)
+	}
+
+	r.Close()
+	wg.Wait()
+
+	response.Info["image_id"] = imageID
+	response.Info["stdout"] = string(dockerOutput)
+	response.Info["stdout_lines"] = strings.Split(string(dockerOutput), "\n")
+	if err != nil {
+		response.Msg = err.Error()
+		common.FailJson(response)
+	}
+	common.ExitJson(response)
 }
